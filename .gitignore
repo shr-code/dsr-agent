@@ -1,0 +1,7 @@
+# clasp: per-machine project link and login token (keep out of git)
+.clasp.json
+.clasprc.json
+
+node_modules/
+.env
+*.log

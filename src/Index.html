@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html>
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1d2330; --muted:#667085; --line:#e3e6ea; --accent:#1a73e8; --ok:#188038; --warn:#b3261e; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14161a; --card:#1d2026; --text:#e8eaed; --muted:#9aa0a6; --line:#30343b; --accent:#8ab4f8; --ok:#81c995; --warn:#f28b82; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width:760px; margin:0 auto; padding:24px 16px 48px; }
+  header { display:flex; justify-content:space-between; align-items:baseline; gap:12px; flex-wrap:wrap; margin-bottom:16px; }
+  h1 { font-size:20px; margin:0; }
+  .pill { font-size:13px; padding:2px 10px; border-radius:999px; border:1px solid var(--line); color:var(--muted); }
+  .pill.sent { color:var(--ok); border-color:var(--ok); }
+  section { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:16px; }
+  h2 { font-size:14px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:0 0 10px; }
+  textarea { width:100%; border:1px solid var(--line); border-radius:8px; padding:10px; font:inherit; color:inherit; background:transparent; resize:vertical; }
+  #draft { min-height:260px; font-family: ui-monospace, Consolas, monospace; font-size:14px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; align-items:center; }
+  button { font:inherit; padding:8px 14px; border-radius:8px; border:1px solid var(--line); background:transparent; color:var(--text); cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button:disabled { opacity:.5; cursor:default; }
+  .hint { color:var(--muted); font-size:13px; }
+  #reply { white-space:pre-wrap; margin-top:10px; }
+  ul { list-style:none; padding:0; margin:0; }
+  li { display:flex; justify-content:space-between; gap:8px; padding:6px 0; border-top:1px solid var(--line); }
+  li:first-child { border-top:0; }
+  .tag { font-size:12px; color:var(--muted); margin-left:6px; }
+  .x { border:0; padding:0 6px; color:var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1 id="title">DSR Agent</h1>
+    <span id="status" class="pill">loading…</span>
+  </header>
+
+  <section>
+    <h2>Log or ask</h2>
+    <textarea id="msg" rows="3" placeholder="e.g. watched a video on Kafka consumers, then fixed the login bug in my expense app"></textarea>
+    <div class="row">
+      <button id="sendMsg" class="primary">Send</button>
+      <span class="hint">Ctrl+Enter to send · Win+H for voice typing</span>
+    </div>
+    <div id="reply"></div>
+  </section>
+
+  <section>
+    <h2>Today's notes</h2>
+    <ul id="notes"></ul>
+  </section>
+
+  <section>
+    <h2>DSR draft</h2>
+    <textarea id="draft" placeholder="No draft yet."></textarea>
+    <div class="row">
+      <button id="makeDraft">Draft DSR</button>
+      <button id="saveEdit">Save edits</button>
+      <button id="post" class="primary">Send to Google Chat</button>
+      <span id="ver" class="hint"></span>
+    </div>
+    <p class="hint">Want the AI to change it? Type instructions in the box above, e.g. "make it shorter".</p>
+  </section>
+</main>
+
+<script>
+  const KEY = <?!= JSON.stringify(key) ?>;
+  let state = null;
+  const $ = (id) => document.getElementById(id);
+
+  function busy(on) {
+    document.querySelectorAll('button').forEach((b) => (b.disabled = on));
+    if (state && !on) applyLocks();
+  }
+
+  function call(fn, ...args) {
+    busy(true);
+    return new Promise((resolve) => {
+      google.script.run
+        .withSuccessHandler((res) => { busy(false); resolve(res); })
+        .withFailureHandler((err) => { busy(false); $('reply').textContent = '⚠️ ' + err.message; resolve(null); })[fn](KEY, ...args);
+    });
+  }
+
+  function applyLocks() {
+    const locked = !state.weekday || state.status === 'sent';
+    ['makeDraft', 'saveEdit', 'post'].forEach((id) => ($(id).disabled = locked));
+    if (!state.draft) { $('saveEdit').disabled = true; $('post').disabled = true; }
+    $('draft').readOnly = locked;
+  }
+
+  function render(s) {
+    state = s;
+    $('title').textContent = 'DSR · ' + s.pretty;
+    const pill = $('status');
+    pill.className = 'pill' + (s.status === 'sent' ? ' sent' : '');
+    pill.textContent = !s.weekday ? 'Weekend: no DSR'
+      : s.status === 'sent' ? 'Sent at ' + s.sentAt
+      : s.draft ? 'Draft ready, not sent' : 'No draft yet';
+
+    const ul = $('notes');
+    ul.innerHTML = '';
+    if (!s.notes.length) ul.innerHTML = '<li class="hint">Nothing logged yet today.</li>';
+    s.notes.forEach((n) => {
+      const li = document.createElement('li');
+      const span = document.createElement('span');
+      span.textContent = n.text;
+      if (n.status !== 'done') {
+        const tag = document.createElement('span');
+        tag.className = 'tag';
+        tag.textContent = n.status.replace('_', ' ');
+        span.appendChild(tag);
+      }
+      const del = document.createElement('button');
+      del.className = 'x';
+      del.title = 'Delete note';
+      del.textContent = '✕';
+      del.onclick = async () => { const r = await call('webDeleteNote', n.id); if (r) show(r); };
+      li.append(span, del);
+      ul.appendChild(li);
+    });
+
+    $('draft').value = s.draft || '';
+    $('ver').textContent = s.draft ? 'v' + s.version : '';
+    applyLocks();
+  }
+
+  function show(res) {
+    if (res.reply) $('reply').textContent = res.reply;
+    render(res.state);
+  }
+
+  async function sendMsg() {
+    const text = $('msg').value.trim();
+    if (!text) return;
+    $('reply').textContent = 'Thinking…';
+    const r = await call('webMessage', text);
+    if (r) { $('msg').value = ''; show(r); }
+  }
+
+  $('sendMsg').onclick = sendMsg;
+  $('msg').addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.ctrlKey) sendMsg(); });
+  $('makeDraft').onclick = async () => { $('reply').textContent = 'Drafting…'; const r = await call('webDraft'); if (r) show(r); };
+  $('saveEdit').onclick = async () => { const r = await call('webSaveEdit', $('draft').value, state.version); if (r) show(r); };
+  $('post').onclick = async () => {
+    if ($('draft').value.trim() !== (state.draft || '').trim()) {
+      alert('You have unsaved edits. Click "Save edits" first.');
+      return;
+    }
+    if (!confirm('Post this DSR to your team\'s Google Chat space now?')) return;
+    const r = await call('webSend', state.version);
+    if (r) show(r);
+  };
+
+  call('webState').then((s) => s && render(s));
+</script>
+</body>
+</html>
